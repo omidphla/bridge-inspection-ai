@@ -169,7 +169,7 @@ if api_key:
                 if os.path.exists(samples_path):
                     samples_text = load_sample_comments(samples_path)
 
-                model = genai.GenerativeModel(model_name="gemini-1.5-pro")
+                model = genai.GenerativeModel(model_name="gemini-1.5-flash")
                 checklist_content = excel_to_text(checklist_file)
                 
                 batch_size = 6
