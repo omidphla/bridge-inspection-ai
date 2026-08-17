@@ -111,11 +111,22 @@ def load_sample_comments(file_or_path, max_samples=15):
 
 st.sidebar.header("⚙️ تنظیمات و مراجع")
 api_key = st.sidebar.text_input("کلید Gemini API:", type="password")
-model_choice = st.sidebar.selectbox("مدل پردازش هوش مصنوعی:", ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro-latest"])
-bridge_type = st.sidebar.selectbox("نوع سازه پل:", ["فلزی (HELP S)", "بتنی (HELP C)"])
 
 if api_key:
     genai.configure(api_key=api_key, transport='rest')
+    
+    # دریافت خودکار مدل‌های فعال و معتبر
+    try:
+        available_models = [
+            m.name.replace("models/", "")
+            for m in genai.list_models()
+            if "generateContent" in m.supported_generation_methods
+        ]
+    except Exception:
+        available_models = ["gemini-1.5-flash", "gemini-1.5-pro"]
+        
+    model_choice = st.sidebar.selectbox("مدل پردازش هوش مصنوعی:", available_models, index=0)
+    bridge_type = st.sidebar.selectbox("نوع سازه پل:", ["فلزی (HELP S)", "بتنی (HELP C)"])
 
     guide_path = os.path.join("guides", "inspection_guide.xlsx")
     samples_path = os.path.join("guides", "sample_comments.xlsx")
