@@ -1,6 +1,6 @@
 import os
 import io
-import re
+import time
 import zipfile
 from PIL import Image
 import openpyxl
@@ -38,9 +38,10 @@ def prepare_image_from_bytes(image_bytes, max_dim=800):
     except Exception:
         return None
 
-def extract_structured_guide(guide_file_or_path, bridge_type="فلزی (HELP S)"):
+# استخراج فشرده و متنی راهنما جهت صرفه‌جویی شدید در توکن
+def extract_guide_text_rules(guide_file_or_path, bridge_type="فلزی (HELP S)"):
     sheet_name = "HELP S" if "فلزی" in bridge_type else "HELP C"
-    prompt_elements = []
+    rules_summary = []
     
     try:
         if isinstance(guide_file_or_path, str):
@@ -53,24 +54,8 @@ def extract_structured_guide(guide_file_or_path, bridge_type="فلزی (HELP S)"
             sheet_name = wb.sheetnames[0]
             
         ws = wb[sheet_name]
-        
-        row_images = {}
-        for img in getattr(ws, '_images', []):
-            r = None
-            if hasattr(img.anchor, '_from'):
-                r = img.anchor._from.row + 1
-            elif isinstance(img.anchor, str):
-                m = re.search(r'\d+', img.anchor)
-                if m: r = int(m.group())
-            if r:
-                try:
-                    row_images.setdefault(r, []).append(img._data())
-                except Exception:
-                    pass
-
         current_element = ""
         current_damage = ""
-        prompt_elements.append(f"=== راهنمای مرجع ارزیابی و تطبیق تصاویر ({sheet_name}) ===")
         
         for r in range(5, min(ws.max_row + 1, 350)):
             c_elem = ws.cell(row=r, column=17).value
@@ -83,28 +68,22 @@ def extract_structured_guide(guide_file_or_path, bridge_type="فلزی (HELP S)"
             if c_dmg is not None and str(c_dmg).strip():
                 current_damage = str(c_dmg).strip()
                 
-            imgs = row_images.get(r, [])
-            if c_sev or c_desc or imgs:
+            if c_sev or c_desc:
                 desc_text = str(c_desc).strip() if c_desc else "-"
                 sev_text = str(c_sev).strip() if c_sev else "-"
-                header = f"\n[المان: {current_element} | نوع آسیب: {current_damage} | سطح شدت: {sev_text}]\nمعیار: {desc_text}"
-                prompt_elements.append(header)
+                rules_summary.append(f"• [{current_element} | {current_damage} | سطح: {sev_text}]: {desc_text}")
                 
-                for img_data in imgs:
-                    prep = prepare_image_from_bytes(img_data, max_dim=600)
-                    if prep:
-                        prompt_elements.append(prep)
     except Exception as e:
-        prompt_elements.append(f"خطا در استخراج راهنما: {str(e)}")
+        rules_summary.append(f"خطا در خواندن ضوابط راهنما: {str(e)}")
         
-    return prompt_elements
+    return "\n".join(rules_summary[:60])
 
-def load_sample_comments(file_or_path, max_samples=15):
+def load_sample_comments(file_or_path, max_samples=10):
     try:
         df = pd.read_excel(file_or_path)
         samples = []
         for _, row in df.dropna().head(max_samples).iterrows():
-            samples.append(f"- پل {row.iloc[0]}:\n  «{row.iloc[1]}»")
+            samples.append(f"- نمونه پل {row.iloc[0]}:\n  «{row.iloc[1]}»")
         return "\n\n".join(samples)
     except Exception:
         return ""
@@ -115,7 +94,6 @@ api_key = st.sidebar.text_input("کلید Gemini API:", type="password")
 if api_key:
     genai.configure(api_key=api_key, transport='rest')
     
-    # دریافت خودکار مدل‌های فعال و معتبر
     try:
         available_models = [
             m.name.replace("models/", "")
@@ -123,7 +101,7 @@ if api_key:
             if "generateContent" in m.supported_generation_methods
         ]
     except Exception:
-        available_models = ["gemini-1.5-flash", "gemini-1.5-pro"]
+        available_models = ["gemini-1.5-flash", "gemini-2.0-flash"]
         
     model_choice = st.sidebar.selectbox("مدل پردازش هوش مصنوعی:", available_models, index=0)
     bridge_type = st.sidebar.selectbox("نوع سازه پل:", ["فلزی (HELP S)", "بتنی (HELP C)"])
@@ -160,9 +138,9 @@ if api_key:
             eval_bar = st.progress(0, text="در حال آماده‌سازی راهنما و ارتباط با مدل...")
             
             try:
-                guide_elements = []
+                guide_text = ""
                 if os.path.exists(guide_path):
-                    guide_elements = extract_structured_guide(guide_path, bridge_type)
+                    guide_text = extract_guide_text_rules(guide_path, bridge_type)
                 
                 samples_text = ""
                 if os.path.exists(samples_path):
@@ -171,7 +149,7 @@ if api_key:
                 model = genai.GenerativeModel(model_name=model_choice)
                 checklist_content = excel_to_text(checklist_file)
                 
-                batch_size = 6
+                batch_size = 5
                 batch_analyses = []
                 image_items = list(images_dict.items())
                 total_batches = (len(image_items) + batch_size - 1) // batch_size
@@ -191,19 +169,22 @@ if api_key:
                     batch_names = [name for name, data in current_batch]
                     
                     prompt_parts = [
-                        "شما ارزیاب ارشد سازه و بازرس تخصصی پل‌ها هستید.",
-                        "الگوها، تعاریف و تصاویر مرجع راهنمای بازرسی:",
-                    ] + guide_elements + [
-                        f"\nاکنون تصاویر میدانی ارسالی را تحلیل کن (فایل‌ها: {', '.join(batch_names)}):",
-                        "۱. المان‌ها (تیر اصلی، تیر فرعی/دال، ستون، نرده، کف‌پله، فونداسیون، تابلو تبلیغاتی و تأسیسات) را شناسایی کن.",
-                        "۲. عیوب را با تصاویر و معیارهای راهنما تطبیق بده و شدت (اضطراری/متوسط/کم) را تعیین کن.",
-                        "۳. میان آسیب‌های سازه‌ای واقعی با عیوب اجرایی اولیه (مثل کج‌سلیقگی اجرایی ورق‌ها، سوراخکاری زهکشی یا آثار حین نصب) تمایز قائل شو."
+                        "شما ارزیاب ارشد سازه و ممیز تخصصی پل‌ها هستید.",
+                        f"ضوابط و معیارهای راهنمای بازرسی:\n{guide_text}",
+                        f"\nتصاویر میدانی ارسالی (فایل‌ها: {', '.join(batch_names)}):",
+                        "۱. المان‌ها (تیر اصلی، تیر فرعی/دال، ستون، نرده، کف‌پله، فونداسیون، تابلو تبلیغاتی) را تفکیک کن.",
+                        "۲. وضعیت رنگ، زنگ‌زدگی، نشت آب، آسیب جوش یا مفقودی اتصالات را مشخص کن.",
+                        "۳. تمایز میان عیوب اجرایی اولیه (مثل کج‌سلیقگی برش ورق یا سوراخکاری آب‌رو) با خرابی‌های سازه‌ای را رعایت کن."
                     ] + images_data
 
+                    # ارسال و مدیریت خطای احتمالی لیمیت
                     res = model.generate_content(prompt_parts)
                     batch_analyses.append(f"تحلیل تصاویر ({', '.join(batch_names)}):\n{res.text}")
+                    
+                    # وقفه ایمن ۳ ثانیه‌ای برای رعایت سقف درخواست در دقیقه
+                    time.sleep(3)
 
-                eval_bar.progress(0.90, text="📝 فاز ۲/۲: تطبیق نهایی با چک‌لیست مشاور و تدوین کامنت ممیزی...")
+                eval_bar.progress(0.90, text="📝 فاز ۲/۲: ممیزی نهایی با چک‌لیست مشاور و تولید کامنت...")
                 all_visual_data = "\n\n".join(batch_analyses)
                 
                 final_prompt = f"""
@@ -212,24 +193,24 @@ if api_key:
                 {all_visual_data}
                 ===================
 
-                چک‌لیست تکمیل‌شده توسط مشاور:
+                چک‌لیست مشاور:
                 ===================
                 {checklist_content}
                 ===================
 
-                الگوی نگارش، لحن ممیزی و نمونه کامنت‌های مورد تایید کارفرما:
+                الگوی نگارش ممیزی کارفرما:
                 ===================
                 {samples_text}
                 ===================
 
-                دستور کار ممیزی نهایی:
-                ۱. تطبیق دقیق ادعاهای چک‌لیست مشاور با مشاهدات عکس‌ها (با ذکر مستقیم شماره عکس‌ها مانند «در عکس شماره...»).
-                ۲. بیان مغایرت‌ها (ثبت نادرست المان، کم‌نمایی یا اغراق در شدت خرابی، نقص ثبت‌نشده مانند مفقودی پیچ فلنج‌ها یا سرقت اعضای قائم نرده، و بررسی وضعیت تابلو تبلیغاتی/تأسیسات عبوری/فونداسیون).
-                ۳. نگارش کامنت نهایی ممیزی، یکپارچه، فنی، صریح و کاملاً منطبق بر سبک نمونه کامنت‌های کارفرما.
+                دستور کار:
+                ۱. تطبیق جزءبه‌جزء با ارجاع مستقیم به شماره عکس‌ها (مثلاً «در عکس شماره...»).
+                ۲. بیان مغایرت‌ها (نقص‌های ثبت‌نشده، شدت غیرواقعی، عدم ارجاع به عکس مناسب).
+                ۳. نگارش متن کامنت نهایی به سبک فنی، صریح و یکپارچه کارفرما.
                 """
                 
                 final_response = model.generate_content(final_prompt)
-                eval_bar.progress(1.0, text="✨ ارزیابی هوشمند با موفقیت تکمیل شد! (100%)")
+                eval_bar.progress(1.0, text="✨ ارزیابی با موفقیت تکمیل شد! (100%)")
                 
                 st.subheader("📋 نتیجه ارزیابی و کامنت ممیزی پیشنهادی:")
                 st.markdown(final_response.text)
