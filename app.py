@@ -11,7 +11,6 @@ import google.generativeai as genai
 st.set_page_config(page_title="سامانه ارزیابی هوشمند بازرسی پل‌ها", layout="wide")
 st.title("🏗️ سامانه تطبیق چک‌لیست و ارزیابی هوشمند تصاویر پل‌ها")
 
-# تابع تبدیل فایل اکسل چک‌لیست به متن جدول‌بندی‌شده
 def excel_to_text(file_or_path):
     try:
         excel_data = pd.read_excel(file_or_path, sheet_name=None)
@@ -24,7 +23,6 @@ def excel_to_text(file_or_path):
     except Exception as e:
         return f"خطا در خواندن فایل اکسل: {str(e)}"
 
-# بهینه‌سازی و فشرده‌سازی تصاویر برای ارسال به API
 def prepare_image_from_bytes(image_bytes, max_dim=800):
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
@@ -32,7 +30,7 @@ def prepare_image_from_bytes(image_bytes, max_dim=800):
             if max(img.size) > max_dim:
                 img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
             buffer = io.BytesIO()
-            img.save(buffer, format="JPEG", quality=70, optimize=True)
+            img.save(buffer, format="JPEG", quality=75, optimize=True)
             return {
                 "mime_type": "image/jpeg",
                 "data": buffer.getvalue()
@@ -40,7 +38,6 @@ def prepare_image_from_bytes(image_bytes, max_dim=800):
     except Exception:
         return None
 
-# استخراج ساختاریافته راهنمای بازرسی بر اساس قالب دقیق HELP S و HELP C
 def extract_structured_guide(guide_file_or_path, bridge_type="فلزی (HELP S)"):
     sheet_name = "HELP S" if "فلزی" in bridge_type else "HELP C"
     prompt_elements = []
@@ -57,7 +54,6 @@ def extract_structured_guide(guide_file_or_path, bridge_type="فلزی (HELP S)"
             
         ws = wb[sheet_name]
         
-        # استخراج لنگر و ردیف تصاویر
         row_images = {}
         for img in getattr(ws, '_images', []):
             r = None
@@ -74,10 +70,8 @@ def extract_structured_guide(guide_file_or_path, bridge_type="فلزی (HELP S)"
 
         current_element = ""
         current_damage = ""
-        
         prompt_elements.append(f"=== راهنمای مرجع ارزیابی و تطبیق تصاویر ({sheet_name}) ===")
         
-        # خواندن سطر به سطر با لحاظ کردن سلول‌های ادغام‌شده
         for r in range(5, min(ws.max_row + 1, 350)):
             c_elem = ws.cell(row=r, column=17).value
             c_dmg = ws.cell(row=r, column=11).value
@@ -90,25 +84,21 @@ def extract_structured_guide(guide_file_or_path, bridge_type="فلزی (HELP S)"
                 current_damage = str(c_dmg).strip()
                 
             imgs = row_images.get(r, [])
-            
             if c_sev or c_desc or imgs:
                 desc_text = str(c_desc).strip() if c_desc else "-"
                 sev_text = str(c_sev).strip() if c_sev else "-"
-                
-                header = f"\n[المان: {current_element} | نوع آسیب: {current_damage} | سطح شدت: {sev_text}]\nمعیار ارزیابی: {desc_text}"
+                header = f"\n[المان: {current_element} | نوع آسیب: {current_damage} | سطح شدت: {sev_text}]\nمعیار: {desc_text}"
                 prompt_elements.append(header)
                 
                 for img_data in imgs:
                     prep = prepare_image_from_bytes(img_data, max_dim=600)
                     if prep:
                         prompt_elements.append(prep)
-                        
     except Exception as e:
         prompt_elements.append(f"خطا در استخراج راهنما: {str(e)}")
         
     return prompt_elements
 
-# استخراج چند نمونه شاخص از فایل کامنت‌ها جهت هدایت لحن و اصول ارزیابی
 def load_sample_comments(file_or_path, max_samples=15):
     try:
         df = pd.read_excel(file_or_path)
@@ -119,9 +109,9 @@ def load_sample_comments(file_or_path, max_samples=15):
     except Exception:
         return ""
 
-# نوار کناری تنظیمات
 st.sidebar.header("⚙️ تنظیمات و مراجع")
 api_key = st.sidebar.text_input("کلید Gemini API:", type="password")
+model_choice = st.sidebar.selectbox("مدل پردازش هوش مصنوعی:", ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro-latest"])
 bridge_type = st.sidebar.selectbox("نوع سازه پل:", ["فلزی (HELP S)", "بتنی (HELP C)"])
 
 if api_key:
@@ -135,7 +125,7 @@ if api_key:
     with col1:
         checklist_file = st.file_uploader("۱. فایل چک‌لیست مشاور (اکسل):", type=['xlsx', 'xls'])
     with col2:
-        uploaded_zip = st.file_uploader("۲. فایل فشرده عکس‌های پل (ZIP):", type=['zip'])
+        uploaded_zip = st.file_uploader("۲. (ZIP) فایل فشرده عکس‌های پل:", type=['zip'])
 
     if checklist_file:
         with st.expander("👁️ پیش‌نمایش چک‌لیست مشاور"):
@@ -145,22 +135,20 @@ if api_key:
     if uploaded_zip:
         try:
             with zipfile.ZipFile(uploaded_zip) as z:
-                for filename in z.namelist():
-                    if filename.lower().endswith(('.jpg', '.jpeg', '.png')) and not filename.startswith('__MACOSX'):
-                        base_name = os.path.basename(filename)
-                        if base_name:
-                            images_dict[base_name] = z.read(filename)
+                valid_files = [f for f in z.namelist() if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) and not f.startswith('__MACOSX')]
+                for filename in valid_files:
+                    base_name = os.path.basename(filename)
+                    if base_name:
+                        images_dict[base_name] = z.read(filename)
             st.success(f"تعداد {len(images_dict)} تصویر از فایل زیپ استخراج شد.")
         except Exception as e:
             st.error(f"خطا در خواندن فایل زیپ: {e}")
 
     if checklist_file and images_dict:
         if st.button("🚀 شروع ارزیابی هوشمند"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            eval_bar = st.progress(0, text="در حال آماده‌سازی راهنما و ارتباط با مدل...")
             
             try:
-                status_text.text("در حال بارگذاری تصاویر و ضوابط شیت راهنمای بازرسی...")
                 guide_elements = []
                 if os.path.exists(guide_path):
                     guide_elements = extract_structured_guide(guide_path, bridge_type)
@@ -169,7 +157,7 @@ if api_key:
                 if os.path.exists(samples_path):
                     samples_text = load_sample_comments(samples_path)
 
-                model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+                model = genai.GenerativeModel(model_name=model_choice)
                 checklist_content = excel_to_text(checklist_file)
                 
                 batch_size = 6
@@ -177,11 +165,15 @@ if api_key:
                 image_items = list(images_dict.items())
                 total_batches = (len(image_items) + batch_size - 1) // batch_size
                 
-                # مرحله ۱: تحلیل دسته‌ای تصاویر با انطباق بر تصاویر راهنما
                 for i in range(0, len(image_items), batch_size):
                     batch_num = (i // batch_size) + 1
                     current_batch = image_items[i:i + batch_size]
-                    status_text.text(f"در حال تحلیل دسته تصاویر {batch_num} از {total_batches}...")
+                    pct = int((batch_num / (total_batches + 1)) * 80)
+                    
+                    eval_bar.progress(
+                        (batch_num / (total_batches + 1)) * 0.8,
+                        text=f"🔍 فاز ۱/۲: ارزیابی تصاویر — دسته {batch_num} از {total_batches} ({pct}%)"
+                    )
                     
                     images_data = [prepare_image_from_bytes(data) for name, data in current_batch]
                     images_data = [img for img in images_data if img is not None]
@@ -199,10 +191,8 @@ if api_key:
 
                     res = model.generate_content(prompt_parts)
                     batch_analyses.append(f"تحلیل تصاویر ({', '.join(batch_names)}):\n{res.text}")
-                    progress_bar.progress((batch_num) / (total_batches + 1))
 
-                # مرحله ۲: ممیزی چک‌لیست مشاور و تدوین کامنت نهایی
-                status_text.text("در حال ممیزی چک‌لیست مشاور و تدوین کامنت نهایی...")
+                eval_bar.progress(0.90, text="📝 فاز ۲/۲: تطبیق نهایی با چک‌لیست مشاور و تدوین کامنت ممیزی...")
                 all_visual_data = "\n\n".join(batch_analyses)
                 
                 final_prompt = f"""
@@ -228,16 +218,13 @@ if api_key:
                 """
                 
                 final_response = model.generate_content(final_prompt)
-                progress_bar.progress(1.0)
-                status_text.empty()
-                progress_bar.empty()
+                eval_bar.progress(1.0, text="✨ ارزیابی هوشمند با موفقیت تکمیل شد! (100%)")
                 
                 st.subheader("📋 نتیجه ارزیابی و کامنت ممیزی پیشنهادی:")
                 st.markdown(final_response.text)
                 
             except Exception as ex:
-                status_text.empty()
-                progress_bar.empty()
+                eval_bar.empty()
                 st.error(f"خطا در پردازش: {str(ex)}")
 else:
     st.warning("لطفاً کلید API را وارد کنید.")
